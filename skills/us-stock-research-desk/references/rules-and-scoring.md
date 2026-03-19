@@ -239,3 +239,36 @@ Suggested max gross allocation:
 - `planned_shares = min(shares_by_risk, shares_by_cap)`
 
 If `planned_shares` is zero, say the setup is too volatile for the account size.
+
+## Market regime adjustment
+
+The script automatically classifies the overall market into one of four regimes based on SPY, QQQ, and VIX:
+
+### Regime classification
+
+- `bull`: SPY above 200-day MA and above 50-day MA, VIX below 20, QQQ above 200-day MA
+- `neutral`: SPY above 200-day MA but below 50-day MA, or VIX 20-25, or mixed signals
+- `bear`: SPY below 200-day MA, or VIX 25-30 with deteriorating trend
+- `crisis`: SPY below 200-day MA and VIX above 30
+
+### Contrarian dip-buy logic (bear and crisis only)
+
+In bear or crisis environments, the scoring system does not retreat. Instead it rewards oversold quality names:
+
+- If drawdown from 52-week high is greater than `30%` but revenue growth is positive and profit margin is positive: bonus `+8` points
+- If 3-month relative strength is very weak (below `-10%`) but the 200-day MA slope is still positive: bonus `+5` points (oversold rebound candidate)
+- Drawdown filters are relaxed for stocks that earn the dip-buy bonus
+- Position sizes are not reduced in bear/crisis — the user prefers aggressive contrarian entries
+
+### Dip Buy Candidate bucket
+
+Active only when regime is bear or crisis:
+
+- Requires dip-buy bonus of at least `8` points
+- Must still pass basic tradability (price, liquidity)
+- Uses a wider stop (roughly `2x ATR`) because volatility is higher
+- Max allocation: up to `50%` in offensive mode, `35%` in balanced
+
+### Bull and neutral regimes
+
+No regime adjustment is applied. Normal scoring rules and bucket thresholds apply unchanged.

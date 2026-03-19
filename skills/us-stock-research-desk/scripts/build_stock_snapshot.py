@@ -423,6 +423,7 @@ def compute_scores(
     min_price: float,
     min_dollar_volume: float,
     profile: str,
+    regime: str = "bull",
 ) -> dict[str, Any]:
     price = clean_float(row.get("last_price"))
     ma20 = clean_float(row.get("ma20"))
@@ -558,18 +559,31 @@ def compute_scores(
         if debt_to_equity is not None and debt_to_equity > 300:
             risk -= 4
 
-        total = int(clamp(trend + price_volume + fundamentals + event + risk, 0, 100))
+        # Dip-buy bonus: in bear/crisis, reward oversold quality names instead of penalizing
+        dip_buy_bonus = 0
+        if regime in ("bear", "crisis"):
+            if drawdown is not None and drawdown > 0.30 and revenue_growth is not None and revenue_growth > 0 and profit_margin is not None and profit_margin > 0:
+                dip_buy_bonus += 8
+            if (rs_3m is not None and rs_3m < -0.10) and clean_float(row.get("ma200_slope")) and row.get("ma200_slope") > 0:
+                dip_buy_bonus += 5
+            # In bear/crisis, relax the drawdown filter for quality dip candidates
+            if dip_buy_bonus > 0 and drawdown is not None and drawdown > 0.55:
+                risk += 8  # partially offset the harsh drawdown penalty
+
+        total = int(clamp(trend + price_volume + fundamentals + event + risk + dip_buy_bonus, 0, 100))
         tradable = bool(
             price is not None
             and price >= min_price
             and avg_dollar_vol20 is not None
             and avg_dollar_vol20 >= min_dollar_volume
             and not (isinstance(days_to_earnings, int) and days_to_earnings <= 2)
-            and not (drawdown is not None and drawdown > 0.55)
+            and not (drawdown is not None and drawdown > 0.55 and dip_buy_bonus == 0)
         )
 
         if isinstance(days_to_earnings, int) and days_to_earnings <= 2:
             bucket = "Catalyst / Event Watch"
+        elif regime in ("bear", "crisis") and dip_buy_bonus >= 8 and tradable:
+            bucket = "Dip Buy Candidate"
         elif total >= 76 and (row.get("breakout20") or row.get("breakout55")) and tradable:
             bucket = "Aggressive Buy Candidate"
         elif total >= 62 and tradable and (row.get("low_volume_pullback") or row.get("bullish_ma_stack") or (rs_3m or 0) > 0.05):
@@ -653,18 +667,30 @@ def compute_scores(
         if debt_to_equity is not None and debt_to_equity > 250:
             risk -= 4
 
-        total = int(clamp(trend + price_volume + fundamentals + event + risk, 0, 100))
+        # Dip-buy bonus: same logic as offensive but slightly more conservative thresholds
+        dip_buy_bonus = 0
+        if regime in ("bear", "crisis"):
+            if drawdown is not None and drawdown > 0.30 and revenue_growth is not None and revenue_growth > 0 and profit_margin is not None and profit_margin > 0:
+                dip_buy_bonus += 8
+            if (rs_3m is not None and rs_3m < -0.10) and clean_float(row.get("ma200_slope")) and row.get("ma200_slope") > 0:
+                dip_buy_bonus += 5
+            if dip_buy_bonus > 0 and drawdown is not None and drawdown > 0.45:
+                risk += 7
+
+        total = int(clamp(trend + price_volume + fundamentals + event + risk + dip_buy_bonus, 0, 100))
         tradable = bool(
             price is not None
             and price >= min_price
             and avg_dollar_vol20 is not None
             and avg_dollar_vol20 >= min_dollar_volume
             and not (isinstance(days_to_earnings, int) and days_to_earnings <= 5)
-            and not (drawdown is not None and drawdown > 0.45)
+            and not (drawdown is not None and drawdown > 0.45 and dip_buy_bonus == 0)
         )
 
         if isinstance(days_to_earnings, int) and days_to_earnings <= 5:
             bucket = "Catalyst / Event Watch"
+        elif regime in ("bear", "crisis") and dip_buy_bonus >= 8 and tradable:
+            bucket = "Dip Buy Candidate"
         elif total >= 80 and (row.get("breakout20") or row.get("breakout55")) and tradable:
             bucket = "Aggressive Buy Candidate"
         elif total >= 65 and (row.get("low_volume_pullback") or row.get("bullish_ma_stack")) and tradable:
@@ -686,8 +712,147 @@ def compute_scores(
     }
 
 
-def build_reasons(row: dict[str, Any]) -> list[str]:
+MARKET_TICKERS = ["SPY", "QQQ", "^VIX"]
+
+
+def download_market_tickers() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Download 1-year daily data for SPY, QQQ, and VIX."""
+    data = yf.download(
+        MARKET_TICKERS,
+        period="1y",
+        interval="1d",
+        auto_adjust=False,
+        group_by="ticker",
+        progress=False,
+        threads=True,
+    )
+    spy = extract_history_frame(data, "SPY")
+    qqq = extract_history_frame(data, "QQQ")
+    vix = extract_history_frame(data, "^VIX")
+    return spy, qqq, vix
+
+
+def _index_trend(frame: pd.DataFrame) -> dict[str, Any]:
+    """Compute trend summary for a market index (SPY or QQQ)."""
+    if frame.empty:
+        return {"price": None, "ma50": None, "ma200": None,
+                "above_ma50": False, "above_ma200": False, "ma50_above_ma200": False}
+    close = frame.get("Adj Close")
+    if close is None or close.dropna().empty:
+        close = frame.get("Close")
+    if close is None or close.dropna().empty:
+        return {"price": None, "ma50": None, "ma200": None,
+                "above_ma50": False, "above_ma200": False, "ma50_above_ma200": False}
+    close = close.dropna()
+    price = clean_float(close.iloc[-1])
+    ma50 = clean_float(close.rolling(50).mean().iloc[-1]) if len(close) >= 50 else None
+    ma200 = clean_float(close.rolling(200).mean().iloc[-1]) if len(close) >= 200 else None
+    return {
+        "price": round_or_none(price),
+        "ma50": round_or_none(ma50),
+        "ma200": round_or_none(ma200),
+        "above_ma50": bool(price and ma50 and price > ma50),
+        "above_ma200": bool(price and ma200 and price > ma200),
+        "ma50_above_ma200": bool(ma50 and ma200 and ma50 > ma200),
+    }
+
+
+def _vix_summary(frame: pd.DataFrame) -> dict[str, Any]:
+    """Compute VIX level and classification."""
+    if frame.empty:
+        return {"level": None, "classification": "unknown"}
+    close = frame.get("Close")
+    if close is None or close.dropna().empty:
+        close = frame.get("Adj Close")
+    if close is None or close.dropna().empty:
+        return {"level": None, "classification": "unknown"}
+    level = clean_float(close.dropna().iloc[-1])
+    if level is None:
+        return {"level": None, "classification": "unknown"}
+    if level < 15:
+        classification = "low"
+    elif level < 20:
+        classification = "normal"
+    elif level < 30:
+        classification = "elevated"
+    else:
+        classification = "high"
+    return {"level": round_or_none(level), "classification": classification}
+
+
+def compute_market_environment(
+    spy_frame: pd.DataFrame,
+    qqq_frame: pd.DataFrame,
+    vix_frame: pd.DataFrame,
+    universe_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Classify the overall market regime and produce warnings.
+
+    In bear/crisis environments the system activates dip-buy scanning instead
+    of reducing position sizes — the user explicitly prefers contrarian entries.
+    """
+    spy = _index_trend(spy_frame)
+    qqq = _index_trend(qqq_frame)
+    vix = _vix_summary(vix_frame)
+
+    # Breadth approximation from scanned universe
+    above_200d = sum(1 for r in universe_rows if r.get("ma200") and r.get("last_price") and r["last_price"] > r["ma200"])
+    sample_size = sum(1 for r in universe_rows if r.get("ma200") is not None)
+    above_200d_pct = round(above_200d / sample_size * 100, 1) if sample_size > 0 else None
+
+    # Regime classification
+    vix_level = vix["level"]
+    spy_below_200 = not spy["above_ma200"]
+    spy_below_50 = not spy["above_ma50"]
+
+    if spy_below_200 and vix_level is not None and vix_level > 30:
+        regime = "crisis"
+    elif spy_below_200 or (vix_level is not None and vix_level >= 25 and spy_below_50):
+        regime = "bear"
+    elif spy_below_50 or (vix_level is not None and 20 <= vix_level < 25):
+        regime = "neutral"
+    else:
+        regime = "bull"
+
+    dip_buy_active = regime in ("bear", "crisis")
+
+    warnings: list[str] = []
+    if regime == "crisis":
+        warnings.append("Market is in crisis mode (SPY below 200-day MA, VIX > 30). Systemic risk is very high.")
+        warnings.append("Dip-buy scan is active — looking for quality names sold off with the market.")
+    elif regime == "bear":
+        warnings.append("Market is in bear mode. Broad trend is broken.")
+        warnings.append("Dip-buy scan is active — looking for oversold quality names.")
+    elif regime == "neutral":
+        warnings.append("Market is in a neutral/mixed zone. Proceed with normal setups but stay alert.")
+
+    return {
+        "regime": regime,
+        "spy": spy,
+        "qqq": qqq,
+        "vix": vix,
+        "breadth_approx": {
+            "above_200d_pct": above_200d_pct,
+            "sample_size": sample_size,
+        },
+        "warnings": warnings,
+        "dip_buy_active": dip_buy_active,
+    }
+
+
+def build_reasons(row: dict[str, Any], regime: str = "bull") -> list[str]:
     reasons: list[str] = []
+    if row.get("bucket") == "Dip Buy Candidate":
+        drawdown = clean_float(row.get("drawdown_52w"))
+        if drawdown is not None:
+            reasons.append(f"Oversold {drawdown:.0%} from 52-week high while the broad market is in {regime} mode.")
+        if clean_float(row.get("revenue_growth")) is not None and row["revenue_growth"] > 0:
+            reasons.append(f"Fundamentals remain healthy with {row['revenue_growth']:.1%} revenue growth despite the sell-off.")
+        if clean_float(row.get("profit_margin")) is not None and row["profit_margin"] > 0:
+            reasons.append(f"Still profitable with {row['profit_margin']:.1%} margin — not a broken business.")
+        if row.get("ma200") and clean_float(row.get("ma200_slope")) and row["ma200_slope"] > 0:
+            reasons.append("Long-term 200-day moving average is still rising despite the short-term drop.")
+        return reasons[:4]
     if row.get("bullish_ma_stack"):
         reasons.append("Price sits above the 20/50/200-day moving averages with a bullish stack.")
     if clean_float(row.get("rs_3m")) is not None and row.get("rs_3m") > 0:
@@ -705,8 +870,14 @@ def build_reasons(row: dict[str, Any]) -> list[str]:
     return reasons[:4]
 
 
-def build_risks(row: dict[str, Any]) -> list[str]:
+def build_risks(row: dict[str, Any], regime: str = "bull") -> list[str]:
     risks: list[str] = []
+    if regime == "crisis":
+        risks.append("CRISIS: SPY is below the 200-day MA and VIX is above 30. Systemic risk is extreme.")
+    elif regime == "bear":
+        risks.append("BEAR: The broad market trend is broken. Even quality names can keep falling.")
+    elif regime == "neutral":
+        risks.append("Market is in a mixed/neutral zone — breakouts may fail more often than usual.")
     if isinstance(row.get("days_to_earnings"), int):
         if row["days_to_earnings"] <= 5:
             risks.append("Earnings are close enough to make the trade binary.")
@@ -720,10 +891,10 @@ def build_risks(row: dict[str, Any]) -> list[str]:
         risks.append(f"The stock is still {row['drawdown_52w']:.1%} below its 52-week high.")
     if clean_float(row.get("debt_to_equity")) is not None and row.get("debt_to_equity") > 250:
         risks.append("Balance-sheet leverage is elevated.")
-    return risks[:4]
+    return risks[:5]
 
 
-def build_trade_plan(row: dict[str, Any], account_size: float, profile: str) -> dict[str, Any]:
+def build_trade_plan(row: dict[str, Any], account_size: float, profile: str, regime: str = "bull") -> dict[str, Any]:
     bucket = row["bucket"]
     price = clean_float(row.get("last_price"))
     atr = clean_float(row.get("atr14")) or (price * 0.05 if price else None)
@@ -746,7 +917,17 @@ def build_trade_plan(row: dict[str, Any], account_size: float, profile: str) -> 
             "risk_budget_pct": 0,
         }
 
-    if row.get("breakout55") or row.get("breakout20"):
+    if bucket == "Dip Buy Candidate":
+        setup = "dip-buy"
+        entry_reference = price
+        buy_zone_low = price * 0.97
+        buy_zone_high = price * 1.02
+        # Wider stop for dip buys — volatility is higher in bear/crisis
+        stop = price - (atr or price * 0.05) * 2.0
+        preferred_action = "Oversold quality name in a weak market. Consider scaling in rather than full size at once."
+        risk_budget_pct = 0.018 if profile == "offensive" else 0.012
+        max_alloc_pct = 0.50 if profile == "offensive" else 0.35
+    elif row.get("breakout55") or row.get("breakout20"):
         setup = "breakout"
         entry_reference = max(pivot or price, price)
         buy_zone_low = entry_reference
@@ -892,6 +1073,13 @@ def main() -> None:
     history, benchmark_history = download_history(symbols, args.benchmark.upper())
     benchmark_returns = compute_benchmark_returns(benchmark_history)
 
+    # Download market-wide tickers for regime classification
+    try:
+        spy_frame, qqq_frame, vix_frame = download_market_tickers()
+    except Exception as exc:
+        print(f"[warn] failed to download market tickers: {exc}")
+        spy_frame, qqq_frame, vix_frame = pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
     session = requests.Session()
     session.headers.update({"User-Agent": args.user_agent, "Accept-Encoding": "gzip, deflate"})
     try:
@@ -917,15 +1105,19 @@ def main() -> None:
         )
         rows.append(row)
 
+    # Compute market environment after enriching rows (needs tech data for breadth)
+    market_env = compute_market_environment(spy_frame, qqq_frame, vix_frame, rows)
+    regime = market_env["regime"]
+
     forward_percentiles = valuation_percentiles(rows, "forward_pe")
     price_to_book_percentiles = valuation_percentiles(rows, "price_to_book")
     for row in rows:
         row["forward_pe_percentile"] = forward_percentiles.get(row["ticker"])
         row["price_to_book_percentile"] = price_to_book_percentiles.get(row["ticker"])
-        row.update(compute_scores(row, min_price, min_dollar_volume, args.profile))
-        row["reasons"] = build_reasons(row)
-        row["risks"] = build_risks(row)
-        row["trade_plan"] = build_trade_plan(row, args.account_size, args.profile)
+        row.update(compute_scores(row, min_price, min_dollar_volume, args.profile, regime))
+        row["reasons"] = build_reasons(row, regime)
+        row["risks"] = build_risks(row, regime)
+        row["trade_plan"] = build_trade_plan(row, args.account_size, args.profile, regime)
 
     rows.sort(key=lambda item: (item.get("score", 0), clean_float(item.get("market_cap")) or 0), reverse=True)
     payload = {
@@ -933,6 +1125,7 @@ def main() -> None:
         "profile": args.profile,
         "benchmark": args.benchmark.upper(),
         "account_size": args.account_size,
+        "market_environment": market_env,
         "screens_used": screens if not tickers else [],
         "tickers_requested": tickers,
         "risk_filters": {

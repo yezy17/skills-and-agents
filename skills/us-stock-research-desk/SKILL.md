@@ -9,6 +9,7 @@ description: Research and manage U.S. equity swing-trade ideas, daily watchlists
 
 Use this skill to turn public U.S. equity data into a daily action plan instead of vague market commentary.
 The default operating style is now `offensive`: favor high-beta momentum, breakouts, and catalyst names, but keep explicit risk caps, defined stops, and smaller event sizing.
+In bear or crisis markets, the system switches to a contrarian dip-buy mode instead of retreating.
 
 ## Workflow
 
@@ -22,6 +23,7 @@ Classify the user request into one of these modes:
 - `single-name-dive`: dig into one stock with more filing and event context
 - `risk-monitor`: update stop levels, check stop alerts, and prepare warning messages
 - `daily-review`: append a structured journal entry after the trading day
+- `backtest-review`: evaluate past recommendations and generate a scoring accuracy report
 
 ### 2. Load only the references you need
 
@@ -29,13 +31,14 @@ Classify the user request into one of these modes:
 - Read `references/rules-and-scoring.md` when you need the scoring rubric, offensive profile rules, setup definitions, or position-sizing rules.
 - Read `references/output-template.md` before drafting the final answer.
 - Read `references/portfolio-workflow.md` only when the user gives holdings, fills, or asks you to remember positions.
-- Read `references/monitoring-and-learning.md` when the user asks about stop rules, hourly monitoring, or how the agent should improve over time.
+- Read `references/monitoring-and-learning.md` when the user asks about stop rules, hourly monitoring, backtesting, or how the agent should improve over time.
 
 ### 3. Use the helper scripts when possible
 
-- Run `scripts/build_stock_snapshot.py` for latest price, trend, volume, fundamentals, catalyst, SEC filing, and risk snapshot data.
+- Run `scripts/build_stock_snapshot.py` for latest price, trend, volume, fundamentals, catalyst, SEC filing, risk snapshot data, and market regime classification.
 - Run `scripts/portfolio_journal.py` to initialize, update, or summarize a transaction ledger.
 - Run `scripts/stop_guard.py` to initialize, update, or check the stop-watch file.
+- Run `scripts/backtest_journal.py` to log recommendations, evaluate past picks after N trading days, and generate scoring accuracy reports.
 - If a script fails because dependencies are missing, say so briefly and fall back to a manual workflow instead of hallucinating values.
 
 ### 4. Cross-check freshness before recommending anything
@@ -45,6 +48,7 @@ If the market data is stale, missing, or contradictory, say so and downgrade con
 
 ## Hard Rules
 
+- Always report the current market regime (bull/neutral/bear/crisis) at the top of any scan output.
 - Use official or primary sources for filings and corporate events whenever available.
 - Treat free market-data wrappers as convenient but imperfect; mention caveats when the source is unofficial or personal-use only.
 - Never promise that a stock will double or return 50 percent in one or two weeks.
@@ -60,17 +64,21 @@ If the market data is stale, missing, or contradictory, say so and downgrade con
 When the user asks for a daily or weekly scan:
 
 1. Use `scripts/build_stock_snapshot.py` with the default `offensive` profile unless the user explicitly asks for a calmer one.
-2. Filter out names that fail basic tradability rules unless the user explicitly wants ultra-high risk.
-3. Rank candidates with the scoring model from `references/rules-and-scoring.md`.
-4. Sort the final output into buckets rather than only `recommended buys`.
+2. Check the `market_environment` section in the output to determine the current regime.
+3. Filter out names that fail basic tradability rules unless the user explicitly wants ultra-high risk.
+4. Rank candidates with the scoring model from `references/rules-and-scoring.md`.
+5. Sort the final output into buckets rather than only `recommended buys`.
 
 Use these buckets:
 
 - `Aggressive Buy Candidate`
 - `Pullback Watch`
 - `Catalyst / Event Watch`
+- `Dip Buy Candidate` (active only in bear/crisis regimes)
 - `Manage Existing Position`
 - `Avoid / No-Trade`
+
+In bear or crisis regimes, the system automatically activates dip-buy scanning to find quality names sold off with the market. Do not reduce position sizes or retreat in these conditions — the user prefers contrarian entries.
 
 If the user asks for only a few names, prefer quality over count.
 
@@ -101,6 +109,15 @@ When the user says `I bought XXX`, `my stop is YYY`, `watch this position`, or a
    - `stop_breached`
 4. If the user wants recurring checks, explain that the skill should be paired with an hourly automation.
 5. If a stop is breached, lead with the alert first and keep the message short and actionable.
+
+## Recommendation Tracking Process
+
+When the system outputs actionable ideas:
+
+1. Log each recommendation using `scripts/backtest_journal.py log` with the ticker, score, bucket, setup, entry reference, stop, trim target, and current market regime.
+2. Periodically run `scripts/backtest_journal.py evaluate` (e.g., weekly) to check what happened to past recommendations after N trading days.
+3. Run `scripts/backtest_journal.py report` to see accuracy by bucket, setup type, score band, and market regime.
+4. Use the report to discuss scoring weight adjustments with the user. Do not auto-change weights — treat report findings as evidence for a conversation.
 
 ## Daily Review Process
 

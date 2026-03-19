@@ -83,3 +83,36 @@ Bad journal use:
 - changing the whole strategy after one red day
 - treating random noise as a new rule
 - doubling risk after a short winning streak
+
+## Backtest validation workflow
+
+Use `scripts/backtest_journal.py` to verify whether the scoring system is actually predictive.
+
+### The cycle
+
+1. **Log**: after each scan, log actionable recommendations with `backtest_journal.py log`
+2. **Evaluate**: after 10+ trading days, run `backtest_journal.py evaluate --horizon 10` to check what happened
+3. **Report**: run `backtest_journal.py report` to see accuracy grouped by bucket, setup, score band, and market regime
+
+### How to read the report
+
+- `direction_accuracy`: what percentage of recommendations moved in the right direction within the horizon
+- `trim_hit_rate`: what percentage reached the first trim target
+- `stop_hit_rate`: what percentage hit the stop level
+- `avg_mfe_pct / avg_mae_pct`: average best-case and worst-case excursion during the window
+
+### What the suggestions mean
+
+The report generates rule-based suggestions:
+
+- direction accuracy below 50% for a bucket → that bucket threshold may be too loose
+- trim hit rate below 25% → trim targets may be too aggressive
+- stop hit rate above 60% → stops may be too tight
+- high direction accuracy for a regime+bucket combo → that pattern is working
+
+### Rules for acting on the report
+
+- treat report findings as evidence for a discussion with the user, not as automatic rule changes
+- do not adjust scoring weights without user approval
+- wait for at least 20+ evaluated recommendations before drawing conclusions
+- compare performance across different market regimes before changing anything

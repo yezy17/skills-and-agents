@@ -69,6 +69,32 @@ The ledger is the durable memory, not the chat transcript.
 When the user supplies a new fill, update the ledger first, then discuss the position.
 When the user supplies or changes a stop, update the stop-watch file in the same turn.
 
+## Backtest commands
+
+### Initialize a recommendation journal
+
+```powershell
+python scripts/backtest_journal.py init --file recommendations.csv
+```
+
+### Log a recommendation
+
+```powershell
+python scripts/backtest_journal.py log --file recommendations.csv --ticker NVDA --score 82 --bucket "Aggressive Buy Candidate" --setup breakout --entry-reference 180.40 --stop 171.00 --trim-1 189.80 --market-regime bull --note "post-breakout swing"
+```
+
+### Evaluate past recommendations
+
+```powershell
+python scripts/backtest_journal.py evaluate --file recommendations.csv --horizon 10
+```
+
+### Generate accuracy report
+
+```powershell
+python scripts/backtest_journal.py report --file recommendations.csv
+```
+
 ## Reporting rule
 
 When showing portfolio state, separate:
