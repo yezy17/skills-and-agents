@@ -16,7 +16,22 @@ import pandas as pd
 import requests
 import yfinance as yf
 
-DEFAULT_SCREENS = ["growth_technology_stocks", "most_actives", "day_gainers"]
+PROFILE_SETTINGS = {
+    "balanced": {
+        "screens": ["growth_technology_stocks", "most_actives", "day_gainers"],
+        "min_price": 5.0,
+        "min_dollar_volume": 20_000_000.0,
+        "breakout_volume_ratio": 1.5,
+        "pullback_volume_ratio": 0.85,
+    },
+    "offensive": {
+        "screens": ["day_gainers", "most_actives", "growth_technology_stocks"],
+        "min_price": 3.0,
+        "min_dollar_volume": 15_000_000.0,
+        "breakout_volume_ratio": 1.3,
+        "pullback_volume_ratio": 0.90,
+    },
+}
 SEC_TICKERS_URL = "https://www.sec.gov/files/company_tickers_exchange.json"
 SEC_SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik}.json"
 DEFAULT_USER_AGENT = "US Stock Research Desk openclaw@example.com"
@@ -27,6 +42,12 @@ logging.getLogger("curl_cffi").setLevel(logging.CRITICAL)
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--profile",
+        default="offensive",
+        choices=sorted(PROFILE_SETTINGS.keys()),
+        help="Research profile. Defaults to the offensive profile.",
+    )
     parser.add_argument("--tickers", help="Comma-separated tickers to analyze")
     parser.add_argument(
         "--screen",
@@ -37,8 +58,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--count", type=int, default=8, help="Per-screen candidate count")
     parser.add_argument("--benchmark", default="SPY", help="Relative-strength benchmark")
     parser.add_argument("--account-size", type=float, default=10_000.0)
-    parser.add_argument("--min-price", type=float, default=5.0)
-    parser.add_argument("--min-dollar-volume", type=float, default=20_000_000.0)
+    parser.add_argument("--min-price", type=float, default=None)
+    parser.add_argument("--min-dollar-volume", type=float, default=None)
     parser.add_argument("--user-agent", default=DEFAULT_USER_AGENT)
     parser.add_argument("--out", help="Write JSON output to this file")
     return parser.parse_args()
@@ -172,7 +193,9 @@ def compute_benchmark_returns(benchmark_history: pd.DataFrame) -> tuple[float | 
 
 
 def compute_technical_frame(
-    frame: pd.DataFrame, benchmark_returns: tuple[float | None, float | None]
+    frame: pd.DataFrame,
+    benchmark_returns: tuple[float | None, float | None],
+    profile_settings: dict[str, Any],
 ) -> dict[str, Any]:
     if frame.empty:
         return {}
@@ -204,8 +227,10 @@ def compute_technical_frame(
 
     pivot20 = close.shift(1).rolling(20).max().iloc[-1] if len(close) >= 21 else None
     pivot55 = close.shift(1).rolling(55).max().iloc[-1] if len(close) >= 56 else None
-    breakout20 = bool(current_close and pivot20 and current_close > pivot20 and (volume_ratio or 0) >= 1.5)
-    breakout55 = bool(current_close and pivot55 and current_close > pivot55 and (volume_ratio or 0) >= 1.5)
+    breakout_ratio = profile_settings["breakout_volume_ratio"]
+    pullback_ratio = profile_settings["pullback_volume_ratio"]
+    breakout20 = bool(current_close and pivot20 and current_close > pivot20 and (volume_ratio or 0) >= breakout_ratio)
+    breakout55 = bool(current_close and pivot55 and current_close > pivot55 and (volume_ratio or 0) >= breakout_ratio)
 
     near_ma20 = bool(current_close and ma20 and abs(current_close - ma20) / current_close <= 0.03)
     near_ma50 = bool(current_close and ma50 and abs(current_close - ma50) / current_close <= 0.03)
@@ -214,7 +239,7 @@ def compute_technical_frame(
         and ma50
         and current_close > ma50
         and (near_ma20 or near_ma50)
-        and (volume_ratio is not None and volume_ratio <= 0.85)
+        and (volume_ratio is not None and volume_ratio <= pullback_ratio)
     )
 
     ret_63 = close.iloc[-1] / close.iloc[-64] - 1 if len(close) >= 64 else None
@@ -393,7 +418,12 @@ def valuation_percentiles(rows: list[dict[str, Any]], field: str) -> dict[str, f
     return {ticker: clean_float(percentile) for ticker, percentile in ranked.to_dict().items()}
 
 
-def compute_scores(row: dict[str, Any], min_price: float, min_dollar_volume: float) -> dict[str, Any]:
+def compute_scores(
+    row: dict[str, Any],
+    min_price: float,
+    min_dollar_volume: float,
+    profile: str,
+) -> dict[str, Any]:
     price = clean_float(row.get("last_price"))
     ma20 = clean_float(row.get("ma20"))
     ma50 = clean_float(row.get("ma50"))
@@ -432,104 +462,217 @@ def compute_scores(row: dict[str, Any], min_price: float, min_dollar_volume: flo
         trend += 2
     trend = min(trend, 35)
 
-    price_volume = 0
-    if row.get("breakout55"):
-        price_volume += 15
-    elif row.get("breakout20"):
-        price_volume += 12
-    elif row.get("low_volume_pullback"):
-        price_volume += 10
     volume_ratio = clean_float(row.get("volume_ratio"))
     daily_return = clean_float(row.get("daily_return"))
-    if volume_ratio is not None and volume_ratio >= 1.2 and daily_return is not None and daily_return > 0:
-        price_volume += 3
-    if atr_pct is not None and atr_pct <= 0.06:
-        price_volume += 2
-    price_volume = min(price_volume, 20)
-
-    fundamentals = 0
-    if revenue_growth is not None and revenue_growth > 0:
-        fundamentals += 6
-        if revenue_growth > 0.10:
-            fundamentals += 2
-    if profit_margin is not None and profit_margin > 0:
-        fundamentals += 5
-        if profit_margin > 0.15:
-            fundamentals += 2
-    if debt_to_equity is not None and debt_to_equity < 150:
-        fundamentals += 4
-        if debt_to_equity < 80:
-            fundamentals += 1
-    elif current_ratio is not None and current_ratio > 1.0:
-        fundamentals += 2
-    if forward_pe_pct is not None:
-        if forward_pe_pct <= 0.40:
-            fundamentals += 4
-        elif forward_pe_pct <= 0.70:
-            fundamentals += 2
-    if roe is not None and roe > 0.12:
-        fundamentals += 3
-    fundamentals = min(fundamentals, 25)
-
     analyst_positive = int(row.get("analyst_positive_30d", 0) or 0)
     analyst_negative = int(row.get("analyst_negative_30d", 0) or 0)
-    event = 0
-    if analyst_positive > analyst_negative:
-        event += 3
-    if row.get("recent_sec_count", 0):
-        event += 2
-    if row.get("has_recent_8k"):
-        event += 2
-    if isinstance(days_to_earnings, int) and 6 <= days_to_earnings <= 21:
-        event += 3
-    event = min(event, 10)
 
-    risk = 0
-    if isinstance(days_to_earnings, int):
-        if days_to_earnings <= 5:
-            risk -= 10
-        elif days_to_earnings <= 10:
+    if profile == "offensive":
+        price_volume = 0
+        if row.get("breakout55"):
+            price_volume += 20
+        elif row.get("breakout20"):
+            price_volume += 16
+        elif row.get("low_volume_pullback"):
+            price_volume += 11
+        if volume_ratio is not None and daily_return is not None and daily_return > 0:
+            if volume_ratio >= 1.8:
+                price_volume += 5
+            elif volume_ratio >= 1.3:
+                price_volume += 3
+        if atr_pct is not None:
+            if 0.03 <= atr_pct <= 0.09:
+                price_volume += 3
+            elif atr_pct < 0.12:
+                price_volume += 1
+        if rs_3m is not None and rs_3m > 0.15:
+            price_volume += 3
+        price_volume = min(price_volume, 30)
+
+        fundamentals = 0
+        if revenue_growth is not None and revenue_growth > 0:
+            fundamentals += 5
+            if revenue_growth > 0.20:
+                fundamentals += 3
+        if profit_margin is not None and profit_margin > 0:
+            fundamentals += 4
+            if profit_margin > 0.12:
+                fundamentals += 2
+        if debt_to_equity is not None and debt_to_equity < 200:
+            fundamentals += 2
+        elif current_ratio is not None and current_ratio > 1.0:
+            fundamentals += 2
+        if forward_pe_pct is not None:
+            if forward_pe_pct <= 0.50:
+                fundamentals += 2
+            elif forward_pe_pct <= 0.80:
+                fundamentals += 1
+        if roe is not None and roe > 0.10:
+            fundamentals += 2
+        fundamentals = min(fundamentals, 18)
+
+        event = 0
+        if analyst_positive > analyst_negative:
+            event += 4
+        if row.get("recent_sec_count", 0):
+            event += 2
+        if row.get("has_recent_8k"):
+            event += 3
+        if isinstance(days_to_earnings, int):
+            if 3 <= days_to_earnings <= 14:
+                event += 4
+            elif 15 <= days_to_earnings <= 28:
+                event += 2
+        event = min(event, 15)
+
+        risk = 0
+        if isinstance(days_to_earnings, int):
+            if days_to_earnings <= 2:
+                risk -= 12
+            elif days_to_earnings <= 5:
+                risk -= 6
+            elif days_to_earnings <= 10:
+                risk -= 3
+        if atr_pct is not None:
+            if atr_pct >= 0.12:
+                risk -= 8
+            elif atr_pct >= 0.10:
+                risk -= 5
+            elif atr_pct >= 0.08:
+                risk -= 2
+        if avg_dollar_vol20 is not None:
+            if avg_dollar_vol20 < 5_000_000:
+                risk -= 12
+            elif avg_dollar_vol20 < min_dollar_volume:
+                risk -= 6
+        if drawdown is not None:
+            if drawdown > 0.55:
+                risk -= 8
+            elif drawdown > 0.40:
+                risk -= 4
+        if price is not None:
+            if price < min_price:
+                risk -= 12
+            elif price < 5:
+                risk -= 4
+        if debt_to_equity is not None and debt_to_equity > 300:
             risk -= 4
-    if atr_pct is not None:
-        if atr_pct >= 0.08:
-            risk -= 5
-        elif atr_pct >= 0.06:
-            risk -= 3
-    if avg_dollar_vol20 is not None:
-        if avg_dollar_vol20 < 10_000_000:
-            risk -= 10
-        elif avg_dollar_vol20 < min_dollar_volume:
-            risk -= 6
-    if drawdown is not None:
-        if drawdown > 0.45:
-            risk -= 7
-        elif drawdown > 0.35:
-            risk -= 4
-    if price is not None and price < min_price:
-        risk -= 10
-    if debt_to_equity is not None and debt_to_equity > 250:
-        risk -= 4
 
-    total = int(clamp(trend + price_volume + fundamentals + event + risk, 0, 100))
-    tradable = bool(
-        price is not None
-        and price >= min_price
-        and avg_dollar_vol20 is not None
-        and avg_dollar_vol20 >= min_dollar_volume
-        and not (isinstance(days_to_earnings, int) and days_to_earnings <= 5)
-        and not (drawdown is not None and drawdown > 0.45)
-    )
+        total = int(clamp(trend + price_volume + fundamentals + event + risk, 0, 100))
+        tradable = bool(
+            price is not None
+            and price >= min_price
+            and avg_dollar_vol20 is not None
+            and avg_dollar_vol20 >= min_dollar_volume
+            and not (isinstance(days_to_earnings, int) and days_to_earnings <= 2)
+            and not (drawdown is not None and drawdown > 0.55)
+        )
 
-    if isinstance(days_to_earnings, int) and days_to_earnings <= 5:
-        bucket = "Catalyst / Event Watch"
-    elif total >= 80 and (row.get("breakout20") or row.get("breakout55")) and tradable:
-        bucket = "Aggressive Buy Candidate"
-    elif total >= 65 and (row.get("low_volume_pullback") or row.get("bullish_ma_stack")) and tradable:
-        bucket = "Pullback Watch"
-    elif total >= 50:
-        bucket = "Catalyst / Event Watch"
+        if isinstance(days_to_earnings, int) and days_to_earnings <= 2:
+            bucket = "Catalyst / Event Watch"
+        elif total >= 76 and (row.get("breakout20") or row.get("breakout55")) and tradable:
+            bucket = "Aggressive Buy Candidate"
+        elif total >= 62 and tradable and (row.get("low_volume_pullback") or row.get("bullish_ma_stack") or (rs_3m or 0) > 0.05):
+            bucket = "Pullback Watch"
+        elif total >= 48:
+            bucket = "Catalyst / Event Watch"
+        else:
+            bucket = "Avoid / No-Trade"
     else:
-        bucket = "Avoid / No-Trade"
+        price_volume = 0
+        if row.get("breakout55"):
+            price_volume += 15
+        elif row.get("breakout20"):
+            price_volume += 12
+        elif row.get("low_volume_pullback"):
+            price_volume += 10
+        if volume_ratio is not None and daily_return is not None and daily_return > 0 and volume_ratio >= 1.2:
+            price_volume += 3
+        if atr_pct is not None and atr_pct <= 0.06:
+            price_volume += 2
+        price_volume = min(price_volume, 20)
+
+        fundamentals = 0
+        if revenue_growth is not None and revenue_growth > 0:
+            fundamentals += 6
+            if revenue_growth > 0.10:
+                fundamentals += 2
+        if profit_margin is not None and profit_margin > 0:
+            fundamentals += 5
+            if profit_margin > 0.15:
+                fundamentals += 2
+        if debt_to_equity is not None and debt_to_equity < 150:
+            fundamentals += 4
+            if debt_to_equity < 80:
+                fundamentals += 1
+        elif current_ratio is not None and current_ratio > 1.0:
+            fundamentals += 2
+        if forward_pe_pct is not None:
+            if forward_pe_pct <= 0.40:
+                fundamentals += 4
+            elif forward_pe_pct <= 0.70:
+                fundamentals += 2
+        if roe is not None and roe > 0.12:
+            fundamentals += 3
+        fundamentals = min(fundamentals, 25)
+
+        event = 0
+        if analyst_positive > analyst_negative:
+            event += 3
+        if row.get("recent_sec_count", 0):
+            event += 2
+        if row.get("has_recent_8k"):
+            event += 2
+        if isinstance(days_to_earnings, int) and 6 <= days_to_earnings <= 21:
+            event += 3
+        event = min(event, 10)
+
+        risk = 0
+        if isinstance(days_to_earnings, int):
+            if days_to_earnings <= 5:
+                risk -= 10
+            elif days_to_earnings <= 10:
+                risk -= 4
+        if atr_pct is not None:
+            if atr_pct >= 0.08:
+                risk -= 5
+            elif atr_pct >= 0.06:
+                risk -= 3
+        if avg_dollar_vol20 is not None:
+            if avg_dollar_vol20 < 10_000_000:
+                risk -= 10
+            elif avg_dollar_vol20 < min_dollar_volume:
+                risk -= 6
+        if drawdown is not None:
+            if drawdown > 0.45:
+                risk -= 7
+            elif drawdown > 0.35:
+                risk -= 4
+        if price is not None and price < min_price:
+            risk -= 10
+        if debt_to_equity is not None and debt_to_equity > 250:
+            risk -= 4
+
+        total = int(clamp(trend + price_volume + fundamentals + event + risk, 0, 100))
+        tradable = bool(
+            price is not None
+            and price >= min_price
+            and avg_dollar_vol20 is not None
+            and avg_dollar_vol20 >= min_dollar_volume
+            and not (isinstance(days_to_earnings, int) and days_to_earnings <= 5)
+            and not (drawdown is not None and drawdown > 0.45)
+        )
+
+        if isinstance(days_to_earnings, int) and days_to_earnings <= 5:
+            bucket = "Catalyst / Event Watch"
+        elif total >= 80 and (row.get("breakout20") or row.get("breakout55")) and tradable:
+            bucket = "Aggressive Buy Candidate"
+        elif total >= 65 and (row.get("low_volume_pullback") or row.get("bullish_ma_stack")) and tradable:
+            bucket = "Pullback Watch"
+        elif total >= 50:
+            bucket = "Catalyst / Event Watch"
+        else:
+            bucket = "Avoid / No-Trade"
 
     return {
         "trend_score": trend,
@@ -580,7 +723,7 @@ def build_risks(row: dict[str, Any]) -> list[str]:
     return risks[:4]
 
 
-def build_trade_plan(row: dict[str, Any], account_size: float) -> dict[str, Any]:
+def build_trade_plan(row: dict[str, Any], account_size: float, profile: str) -> dict[str, Any]:
     bucket = row["bucket"]
     price = clean_float(row.get("last_price"))
     atr = clean_float(row.get("atr14")) or (price * 0.05 if price else None)
@@ -607,12 +750,12 @@ def build_trade_plan(row: dict[str, Any], account_size: float) -> dict[str, Any]
         setup = "breakout"
         entry_reference = max(pivot or price, price)
         buy_zone_low = entry_reference
-        buy_zone_high = entry_reference + (atr or price * 0.03) * 0.5
-        provisional_stop = entry_reference - (atr or price * 0.03) * 1.2
+        buy_zone_high = entry_reference + (atr or price * 0.03) * (0.75 if profile == "offensive" else 0.5)
+        provisional_stop = entry_reference - (atr or price * 0.03) * (1.35 if profile == "offensive" else 1.2)
         stop = min(ma20, provisional_stop) if ma20 else provisional_stop
         preferred_action = "Buy only on a fresh breakout confirmation or an orderly retest near the pivot."
-        risk_budget_pct = 0.015
-        max_alloc_pct = 0.35
+        risk_budget_pct = 0.018 if profile == "offensive" else 0.015
+        max_alloc_pct = 0.40 if profile == "offensive" else 0.35
     elif row.get("low_volume_pullback"):
         setup = "pullback"
         support = ma20 if ma20 and abs(price - ma20) <= abs(price - (ma50 or ma20)) else (ma50 or ma20 or price)
@@ -622,21 +765,21 @@ def build_trade_plan(row: dict[str, Any], account_size: float) -> dict[str, Any]
         provisional_stop = buy_zone_low - (atr or price * 0.03) * 1.0
         stop = min((ma50 * 0.98) if ma50 else provisional_stop, provisional_stop)
         preferred_action = "Let the pullback prove support before adding or starting the position."
-        risk_budget_pct = 0.01
-        max_alloc_pct = 0.25
+        risk_budget_pct = 0.0125 if profile == "offensive" else 0.01
+        max_alloc_pct = 0.30 if profile == "offensive" else 0.25
     else:
         setup = "catalyst"
         entry_reference = price
-        buy_zone_low = price * 0.98
-        buy_zone_high = price * 1.02
+        buy_zone_low = price * 0.985
+        buy_zone_high = price * 1.025
         stop = price - (atr or price * 0.04) * 1.5
         preferred_action = "Treat this as a smaller catalyst trade rather than a normal swing position."
-        risk_budget_pct = 0.005
-        max_alloc_pct = 0.15
+        risk_budget_pct = 0.0075 if profile == "offensive" else 0.005
+        max_alloc_pct = 0.20 if profile == "offensive" else 0.15
 
     if bucket == "Catalyst / Event Watch":
-        risk_budget_pct = min(risk_budget_pct, 0.005)
-        max_alloc_pct = min(max_alloc_pct, 0.15)
+        risk_budget_pct = min(risk_budget_pct, 0.0075 if profile == "offensive" else 0.005)
+        max_alloc_pct = min(max_alloc_pct, 0.20 if profile == "offensive" else 0.15)
         if "smaller" not in preferred_action.lower():
             preferred_action += " Treat it as a smaller event-driven position."
 
@@ -669,10 +812,11 @@ def enrich_row(
     seed_quote: dict[str, Any],
     frame: pd.DataFrame,
     benchmark_returns: tuple[float | None, float | None],
+    profile_settings: dict[str, Any],
     sec_map: dict[str, int],
     sec_session: requests.Session,
 ) -> dict[str, Any]:
-    tech = compute_technical_frame(frame, benchmark_returns)
+    tech = compute_technical_frame(frame, benchmark_returns, profile_settings)
     quote_pack = safe_info(symbol)
     info = quote_pack["info"]
     fast_info = quote_pack["fast_info"]
@@ -734,7 +878,12 @@ def enrich_row(
 
 def main() -> None:
     args = parse_args()
-    screens = args.screens or DEFAULT_SCREENS
+    profile_settings = PROFILE_SETTINGS[args.profile]
+    screens = args.screens or profile_settings["screens"]
+    min_price = args.min_price if args.min_price is not None else profile_settings["min_price"]
+    min_dollar_volume = (
+        args.min_dollar_volume if args.min_dollar_volume is not None else profile_settings["min_dollar_volume"]
+    )
     tickers = parse_ticker_list(args.tickers)
     symbols, seed_quotes = build_universe(tickers, screens, args.count)
     if not symbols:
@@ -757,7 +906,15 @@ def main() -> None:
         if frame.empty:
             print(f"[warn] missing history for {symbol}")
             continue
-        row = enrich_row(symbol, seed_quotes.get(symbol, {}), frame, benchmark_returns, sec_map, session)
+        row = enrich_row(
+            symbol,
+            seed_quotes.get(symbol, {}),
+            frame,
+            benchmark_returns,
+            profile_settings,
+            sec_map,
+            session,
+        )
         rows.append(row)
 
     forward_percentiles = valuation_percentiles(rows, "forward_pe")
@@ -765,18 +922,23 @@ def main() -> None:
     for row in rows:
         row["forward_pe_percentile"] = forward_percentiles.get(row["ticker"])
         row["price_to_book_percentile"] = price_to_book_percentiles.get(row["ticker"])
-        row.update(compute_scores(row, args.min_price, args.min_dollar_volume))
+        row.update(compute_scores(row, min_price, min_dollar_volume, args.profile))
         row["reasons"] = build_reasons(row)
         row["risks"] = build_risks(row)
-        row["trade_plan"] = build_trade_plan(row, args.account_size)
+        row["trade_plan"] = build_trade_plan(row, args.account_size, args.profile)
 
     rows.sort(key=lambda item: (item.get("score", 0), clean_float(item.get("market_cap")) or 0), reverse=True)
     payload = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
+        "profile": args.profile,
         "benchmark": args.benchmark.upper(),
         "account_size": args.account_size,
         "screens_used": screens if not tickers else [],
         "tickers_requested": tickers,
+        "risk_filters": {
+            "min_price": min_price,
+            "min_dollar_volume": min_dollar_volume,
+        },
         "candidate_count": len(rows),
         "source_notes": {
             "prices": "yfinance",

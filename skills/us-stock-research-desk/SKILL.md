@@ -1,6 +1,6 @@
 ---
 name: us-stock-research-desk
-description: Research and manage U.S. equity swing-trade ideas, daily watchlists, catalyst calendars, and existing holdings using public market data plus SEC filings. Use whenever the user asks for 美股 or US stocks ideas, daily scans, watchlist ranking, breakout or pullback entries, earnings or 8-K catalyst review, analyst-rating changes, risk flags, or wants OpenClaw to remember positions and turn them into entry, trim, hold, or exit plans.
+description: Research and manage U.S. equity swing-trade ideas, daily watchlists, catalyst calendars, and existing holdings using public market data plus SEC filings. Use whenever the user asks for 美股 or U.S. stock ideas, offensive scans, watchlist ranking, breakout or pullback entries, earnings or 8-K catalyst review, analyst-rating changes, risk flags, or wants OpenClaw to remember positions and turn them into entry, trim, hold, or exit plans.
 ---
 
 # US Stock Research Desk
@@ -8,30 +8,34 @@ description: Research and manage U.S. equity swing-trade ideas, daily watchlists
 ## Overview
 
 Use this skill to turn public U.S. equity data into a daily action plan instead of vague market commentary.
-Prioritize fresh dates, explicit rules, scenario-based entries and exits, and risk labels that make uncertainty obvious.
+The default operating style is now `offensive`: favor high-beta momentum, breakouts, and catalyst names, but keep explicit risk caps, defined stops, and smaller event sizing.
 
 ## Workflow
 
 ### 1. Choose the mode
 
-Classify the user request into one of four modes:
+Classify the user request into one of these modes:
 
 - `daily-scan`: build a ranked idea list from public screens or a watchlist
 - `watchlist-review`: score a user-provided ticker list and update the action plan
-- `portfolio-review`: update holdings, assess position health, and suggest hold/trim/exit logic
+- `portfolio-review`: update holdings, assess position health, and suggest hold or trim or exit logic
 - `single-name-dive`: dig into one stock with more filing and event context
+- `risk-monitor`: update stop levels, check stop alerts, and prepare warning messages
+- `daily-review`: append a structured journal entry after the trading day
 
 ### 2. Load only the references you need
 
 - Read `references/data-sources.md` before deciding which data source to trust.
-- Read `references/rules-and-scoring.md` when you need the scoring rubric, setup definitions, or position-sizing rules.
+- Read `references/rules-and-scoring.md` when you need the scoring rubric, offensive profile rules, setup definitions, or position-sizing rules.
 - Read `references/output-template.md` before drafting the final answer.
 - Read `references/portfolio-workflow.md` only when the user gives holdings, fills, or asks you to remember positions.
+- Read `references/monitoring-and-learning.md` when the user asks about stop rules, hourly monitoring, or how the agent should improve over time.
 
 ### 3. Use the helper scripts when possible
 
 - Run `scripts/build_stock_snapshot.py` for latest price, trend, volume, fundamentals, catalyst, SEC filing, and risk snapshot data.
 - Run `scripts/portfolio_journal.py` to initialize, update, or summarize a transaction ledger.
+- Run `scripts/stop_guard.py` to initialize, update, or check the stop-watch file.
 - If a script fails because dependencies are missing, say so briefly and fall back to a manual workflow instead of hallucinating values.
 
 ### 4. Cross-check freshness before recommending anything
@@ -46,6 +50,8 @@ If the market data is stale, missing, or contradictory, say so and downgrade con
 - Never promise that a stock will double or return 50 percent in one or two weeks.
 - If the user asks for very aggressive growth, still respond with defined-risk setups, invalidation levels, and smaller event sizes.
 - Never output a naked `buy this now` line. Always include setup type, entry logic, stop or invalidation, first trim level, and key risk flags.
+- Do not assume a stop price guarantees the exit price. Fast markets and gaps can slip through the intended level.
+- A skill alone is passive. If the user wants hourly stop checks or push-style reminders, pair the skill with an automation or scheduler.
 - Do not hide uncertainty. Missing fields should remain missing.
 - Avoid illiquid names by default. The user must opt in if they want lottery-ticket or micro-cap ideas.
 
@@ -53,7 +59,7 @@ If the market data is stale, missing, or contradictory, say so and downgrade con
 
 When the user asks for a daily or weekly scan:
 
-1. Use `scripts/build_stock_snapshot.py` with either the user watchlist or the default screen presets.
+1. Use `scripts/build_stock_snapshot.py` with the default `offensive` profile unless the user explicitly asks for a calmer one.
 2. Filter out names that fail basic tradability rules unless the user explicitly wants ultra-high risk.
 3. Rank candidates with the scoring model from `references/rules-and-scoring.md`.
 4. Sort the final output into buckets rather than only `recommended buys`.
@@ -73,14 +79,37 @@ If the user asks for only a few names, prefer quality over count.
 When the user gives current holdings or fills:
 
 1. Update the ledger with `scripts/portfolio_journal.py`.
-2. Recalculate cost basis, realized P/L, unrealized P/L, and active position size.
-3. For each active holding, answer four questions:
+2. If the user gives a stop, also update the stop-watch file with `scripts/stop_guard.py`.
+3. Recalculate cost basis, realized P/L, unrealized P/L, and active position size.
+4. For each active holding, answer four questions:
    - Is the trend still intact?
    - Did the thesis improve, stall, or break?
    - Is the stock near earnings or another major catalyst?
    - What action makes sense now: hold, add, trim, or exit?
-4. If the position is extended above the buy zone, do not tell the user to chase it. Switch to hold or trim language.
-5. If price breaks the invalidation level on heavy volume, prefer trim or exit over hoping.
+5. If the position is extended above the buy zone, do not tell the user to chase it. Switch to hold or trim language.
+6. If price breaks the invalidation level on heavy volume, prefer trim or exit over hoping.
+
+## Risk Monitoring Process
+
+When the user says `I bought XXX`, `my stop is YYY`, `watch this position`, or asks for stop reminders:
+
+1. Update the ledger with the fill.
+2. Update the stop-watch file with ticker, shares, entry, stop, and thesis.
+3. Use `scripts/stop_guard.py check` to classify each active position as:
+   - `ok`
+   - `near_stop`
+   - `stop_breached`
+4. If the user wants recurring checks, explain that the skill should be paired with an hourly automation.
+5. If a stop is breached, lead with the alert first and keep the message short and actionable.
+
+## Daily Review Process
+
+When the user wants the agent to learn and improve:
+
+1. Keep a daily review file based on `assets/daily-trading-review-template.md`.
+2. Update it after the trading day, not every intraday wiggle.
+3. Capture process quality, risk control, and rule adherence before P/L vanity metrics.
+4. Treat new lessons as observations first. Do not turn a single day's emotion into a permanent rule.
 
 ## Output Discipline
 
@@ -94,7 +123,7 @@ At minimum, every actionable idea must include:
 - why it ranked here
 - setup type
 - preferred entry trigger or buy zone
-- stop / invalidation
+- stop or invalidation
 - first trim level and next management rule
 - catalyst window
 - main reasons to skip the trade
@@ -107,11 +136,10 @@ Instead:
 
 - say the goal is highly speculative and could lead to large losses
 - keep the scan focused on high-beta momentum and catalyst names
-- reduce size around binary events
+- reduce size around binary events even in offensive mode
 - present the trade as a scenario, not a forecast
 
 ## Notes For Future Iteration
 
 This skill is intentionally rules-based and data-first.
 If you later notice repeated manual work, extend the scripts before expanding the prompt.
-

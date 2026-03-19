@@ -7,6 +7,7 @@ Do not collapse everything into one paragraph.
 
 - `As of`: exact date for price data
 - `Mode`: daily scan, watchlist review, portfolio review, or single-name dive
+- `Profile`: offensive or balanced
 - `Risk tone`: normal, aggressive, or event-driven
 - `What I checked`: short line naming the main data sources
 
@@ -24,6 +25,7 @@ For each name, use the following fields in this order:
 - `Preferred action now`: buy trigger, watch, hold, trim, or exit
 - `Buy zone or trigger`: exact numbers when possible
 - `Invalidation / stop`: exact number and what would make the thesis wrong
+- `Stop-watch status`: ok / near stop / stop breached when the user already holds the name
 - `Profit plan`: first trim and next management rule
 - `Sizing note`: how large the position should be relative to the account and why
 - `Catalyst window`: earnings date, filing date, analyst change window, or sector news timing
@@ -38,6 +40,8 @@ If the user has active holdings, summarize them separately after the ranked list
 - `Hold`: trend intact, no action needed
 - `Trim`: extended or event risk rising
 - `Exit`: thesis broken or stop violated
+
+If any stop is near or breached, add a short `Alerts` section above the normal portfolio actions.
 
 ## Watchlist Changes
 

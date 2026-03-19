@@ -1,5 +1,5 @@
 interface:
   display_name: "US Stock Research Desk"
   short_description: "Daily US equity research and trade planning"
-  default_prompt: "Use $us-stock-research-desk to scan U.S. stocks, rank setups, and turn my watchlist or holdings into a risk-aware action plan."
+  default_prompt: "Use $us-stock-research-desk in offensive mode to scan U.S. stocks, rank setups, and turn my watchlist or holdings into a risk-aware action plan."
 
